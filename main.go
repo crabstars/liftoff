@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/crabstars/liftoff/hetzner"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/ssh"
@@ -33,37 +34,10 @@ func main() {
 
 	hetzner_key := os.Getenv("HETZNER_CLOUD_API_KEY")
 	client := hcloud.NewClient(hcloud.WithToken(hetzner_key))
-	datacenters, err := client.Datacenter.All(context.Background())
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("-----Datacenters------")
-	for _, datacenter := range datacenters {
-		fmt.Println(
-			datacenter.Name,
-			datacenter.ID,
-			datacenter.Location.Name,
-			datacenter.Location.Description,
-		)
-	}
 
-	fmt.Println("-----Images------")
-	images, err := client.Image.All(context.Background())
-	if err != nil {
-		log.Fatal(err)
-	}
-	for _, image := range images {
-		fmt.Println(image.Name)
-	}
-
-	fmt.Println("-----Server Types------")
-	serverTypes, err := client.ServerType.All(context.Background())
-	if err != nil {
-		log.Fatal(err)
-	}
-	for _, serverType := range serverTypes {
-		fmt.Println(serverType.Name, serverType.Cores, serverType.Memory)
-	}
+	serverType, _ := hetzner.GetSmallestServer(client)
+	image, _ := hetzner.GetDockerCeImage(client)
+	datacenter, _ := hetzner.GetDatacenter(client, hetzner.CountryGermany)
 
 	fmt.Println("-----SSH Keys------")
 	sshKeys, err := client.SSHKey.All(context.Background())
@@ -78,12 +52,11 @@ func main() {
 	serverCreateResult, _, err := client.Server.Create(
 		context.Background(),
 		hcloud.ServerCreateOpts{
-			Name:       "LiftTest",
-			Automount:  &automount,
-			Datacenter: datacenters[0],
-			Image:      images[1], // get image later by image Name
-			// Location:   datacenters[0].Location,
-			ServerType: serverTypes[0],
+			Name:       "LiftTest2",
+			Automount:  &automount, // volumes for mounting
+			Datacenter: datacenter,
+			Image:      image,
+			ServerType: serverType,
 			SSHKeys: []*hcloud.SSHKey{
 				sshKeys[0],
 			},
@@ -107,7 +80,7 @@ func main() {
 	}
 	fmt.Println(ip.String())
 	fmt.Println("Finish Creating Server")
-	createSSHConnection(ip.String())
+	//createSSHConnection(ip.String())
 }
 
 func createSSHConnection(serverIP string) {
