@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/crabstars/liftoff/hetzner"
@@ -25,33 +26,72 @@ var baseStyle = lipgloss.NewStyle().
 	BorderStyle(lipgloss.NormalBorder()).
 	BorderForeground(lipgloss.Color("240"))
 
+type createServerState struct {
+	waitingForServerNameInput bool
+	serverNameInput           textinput.Model
+	creatingServer            bool
+}
+
+type TableUpdateMsg []table.Row
+
 // TODO cache later some hetzner information => only get server information at the start
 type model struct {
-	choices     []string // create or delete server
-	cursor      int      // which list item our cursor is pointing at
-	spinner     spinner.Model
-	loading     bool
-	showTable   bool
-	serverTable table.Model
+	choices            []string // create or delete server
+	cursor             int      // which list item our cursor is pointing at
+	spinner            spinner.Model
+	showTable          bool
+	serverTable        table.Model
+	createServerState  createServerState
+	tabelUpdateChannel chan TableUpdateMsg
 }
 
 func initialModel() model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
+	ti := textinput.New()
+	ti.Placeholder = "Server Name"
+	ti.CharLimit = 156
+	ti.Width = 20
 	return model{
-		choices: []string{"Show server", "Create server", "Delete server"},
-		spinner: s,
+		createServerState:  createServerState{serverNameInput: ti},
+		choices:            []string{"Show server", "Create server", "Delete server"},
+		spinner:            s,
+		tabelUpdateChannel: make(chan TableUpdateMsg),
 	}
 }
 
+type TickMsg time.Time
+
 func (m model) Init() tea.Cmd {
+	// textinput.Blink()
+	// m.createServerState.serverNameInput.BlinkSpeed
 	// Just return `nil`, which means "no I/O right now, please."
-	return nil
+	return tea.Batch(m.spinner.Tick, tickEvery(time.Second*2))
+}
+
+func tickEvery(duration time.Duration) tea.Cmd {
+	return tea.Tick(duration, func(t time.Time) tea.Msg {
+		return TickMsg(t)
+	})
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
+
 	switch msg := msg.(type) {
+
+	case TickMsg:
+		if m.showTable {
+			// TODO: remember selected table
+			// BUG: table does not fetch after going back and again to showTable
+			go m.fetchTableRows()
+			select {
+			case rows := <-m.tabelUpdateChannel:
+				m.loadTableWithoutFetch(rows)
+			default:
+			}
+			return m, tickEvery(time.Second * 2)
+		}
 
 	case tea.KeyMsg:
 		keyStroke := msg.String()
@@ -60,18 +100,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
-		if m.loading {
+		if m.createServerState.creatingServer {
 			return m, nil
+		}
+
+		if m.createServerState.waitingForServerNameInput {
+			if !m.createServerState.serverNameInput.Focused() {
+				m.createServerState.serverNameInput.Focus()
+			}
+			switch msg.Type {
+			case tea.KeyCtrlC, tea.KeyEsc:
+				m.createServerState.waitingForServerNameInput = false
+				return m, nil
+			case tea.KeyEnter:
+				m.createServerState.waitingForServerNameInput = false
+				m.createServerState.creatingServer = true
+				return m, tea.Batch(m.spinner.Tick, createServer(m.createServerState.serverNameInput.Value(), &m))
+			}
+			m.createServerState.serverNameInput, cmd = m.createServerState.serverNameInput.Update(msg)
+
+			return m, cmd
+
 		}
 
 		if m.showTable {
 			switch keyStroke {
 			case "esc":
-				if m.serverTable.Focused() {
-					m.serverTable.Blur()
-				} else {
-					m.serverTable.Focus()
-				}
+				m.showTable = false
 			case "q", "ctrl+c":
 				return m, tea.Quit
 			case "enter":
@@ -101,12 +156,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loadTable()
 				m.showTable = true
 			case 1:
-				log.Printf("Creating server")
-				m.loading = true
-				// if only one is needed just use tea.Cmd
-				// TODO: add flag for test
-				return m, tea.Batch(m.spinner.Tick, createServer)
-				// return m, tea.Batch(m.spinner.Tick, createServerSimulation(4))
+				m.createServerState.waitingForServerNameInput = true
+				log.Printf("waiting for name input")
+				return m, nil
 			case 2:
 				log.Printf("Delete server")
 			default:
@@ -117,15 +169,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case string:
 		if msg == SERVER_CREATED_SUCCESS {
-			m.loading = false
+			m.createServerState.creatingServer = false
 			log.Printf("Server created successfully")
 		} else if msg == SERVER_CREATED_Failed {
-			m.loading = false
+			m.createServerState.creatingServer = false
 			log.Printf("Server creation failed")
 		}
 
 	case spinner.TickMsg:
-		if m.loading {
+		if m.createServerState.creatingServer {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
@@ -135,13 +187,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) View() string {
+func ViewHandleCreateServerState(m model) string {
 
-	if m.loading {
-		str := fmt.Sprintf("\n\n   %s Loading server creation...press q to quit LiftOff\n\n", m.spinner.View())
-		return str
+	if m.createServerState.waitingForServerNameInput {
+		return fmt.Sprintf("Enter server name:\n\n%s\n\n%s", m.createServerState.serverNameInput.View(), "(esc to quit)")
 	}
 
+	if m.createServerState.creatingServer {
+		return fmt.Sprintf("\n\n   %s Loading server creation...press q to quit LiftOff\n\n", m.spinner.View())
+	}
+
+	return ""
+}
+
+func (m model) View() string {
+
+	if state := ViewHandleCreateServerState(m); state != "" {
+		return state
+	}
 	if m.showTable {
 		log.Printf("%s", m.serverTable.View()+" "+m.serverTable.HelpView()+"\n")
 		return baseStyle.Render(m.serverTable.View()) + "\n " + m.serverTable.HelpView() + "\n"
@@ -180,7 +243,7 @@ func main() {
 		defer f.Close()
 	}
 
-	p := tea.NewProgram(initialModel())
+	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		log.Fatal("Error while starting %v", err)
 	}
@@ -200,7 +263,7 @@ func (m *model) loadTable() {
 		{Title: "Status", Width: 10},
 		{Title: "Datacenter", Width: 10},
 		{Title: "CPU Type", Width: 8},
-		{Title: "Server Type", Width: 10},
+		{Title: "Server Type", Width: 15},
 		{Title: "Cores", Width: 10},
 		{Title: "Memory", Width: 10},
 		{Title: "Disk", Width: 10},
@@ -226,9 +289,105 @@ func (m *model) loadTable() {
 		Bold(false)
 	t.SetStyles(s)
 	m.serverTable = t
-
 }
 
+func (m *model) loadTableWithoutFetch(rows []table.Row) {
+	columns := []table.Column{
+		{Title: "Name", Width: 30},
+		{Title: "Image", Width: 20},
+		{Title: "Status", Width: 10},
+		{Title: "Datacenter", Width: 10},
+		{Title: "CPU Type", Width: 8},
+		{Title: "Server Type", Width: 15},
+		{Title: "Cores", Width: 10},
+		{Title: "Memory", Width: 10},
+		{Title: "Disk", Width: 10},
+	}
+
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithRows(rows),
+		table.WithFocused(true),
+		table.WithHeight(10),
+	)
+
+	s := table.DefaultStyles()
+	s.Header = s.Header.
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		BorderBottom(true).
+		Bold(false)
+	s.Selected = s.Selected.
+		Foreground(lipgloss.Color("229")).
+		Background(lipgloss.Color("57")).
+		Bold(false)
+	t.SetStyles(s)
+	m.serverTable = t
+}
+func (m *model) fetchTableRows() {
+	var rows []table.Row
+	hetzner_key := os.Getenv("HETZNER_CLOUD_API_KEY")
+	client := hcloud.NewClient(hcloud.WithToken(hetzner_key))
+	servers, err := client.Server.All(context.Background())
+	if err != nil {
+		log.Println("could not get all server", err)
+		return
+	}
+	for _, server := range servers {
+		rows = append(rows, table.Row{server.Name, server.Image.Name, string(server.Status), server.Datacenter.Location.City,
+			string(server.ServerType.CPUType), server.ServerType.Name, fmt.Sprintf("%d", server.ServerType.Cores), fmt.Sprintf("%.0f GB", server.ServerType.Memory), fmt.Sprintf("%d GB", server.ServerType.Disk)})
+		// log.Println("%s", server.Name, server.Image.Name, server.Status, server.Datacenter.Name)
+	}
+	log.Println("table fetched")
+	m.tabelUpdateChannel <- rows
+}
+
+//	func (m *model) loadTableInBackground() {
+//		for {
+//			select {
+//			case <-m.tabelReloadChannel:
+//				log.Println("existing table reload")
+//				return
+//			default:
+//				columns := []table.Column{
+//					{Title: "Name", Width: 30},
+//					{Title: "Image", Width: 20},
+//					{Title: "Status", Width: 10},
+//					{Title: "Datacenter", Width: 10},
+//					{Title: "CPU Type", Width: 8},
+//					{Title: "Server Type", Width: 15},
+//					{Title: "Cores", Width: 10},
+//					{Title: "Memory", Width: 10},
+//					{Title: "Disk", Width: 10},
+//				}
+//				rows := listServer()
+//
+//				t := table.New(
+//					table.WithColumns(columns),
+//					table.WithRows(rows),
+//					table.WithFocused(true),
+//					table.WithHeight(10),
+//				)
+//
+//				s := table.DefaultStyles()
+//				s.Header = s.Header.
+//					BorderStyle(lipgloss.NormalBorder()).
+//					BorderForeground(lipgloss.Color("240")).
+//					BorderBottom(true).
+//					Bold(false)
+//				s.Selected = s.Selected.
+//					Foreground(lipgloss.Color("229")).
+//					Background(lipgloss.Color("57")).
+//					Bold(false)
+//				t.SetStyles(s)
+//				m.serverTable = t
+//				// m.serverTable, _ = m.serverTable.Update("reloaded")
+//				// m.serverTable.UpdateViewport()
+//				log.Println("table refreshed")
+//				time.Sleep(2 * time.Second)
+//			}
+//		}
+//	}
 func listServer() []table.Row {
 
 	var rows []table.Row
@@ -247,34 +406,19 @@ func listServer() []table.Row {
 	return rows
 }
 
-func deleteServer(serverID int) {
-	hetzner_key := os.Getenv("HETZNER_CLOUD_API_KEY")
-	client := hcloud.NewClient(hcloud.WithToken(hetzner_key))
-	server, _, err := client.Server.GetByID(context.Background(), int64(serverID))
-	if err != nil {
-		log.Println("could not get server for deleting", err)
-		return
-	}
-	_, _, err = client.Server.DeleteWithResult(context.Background(), server)
-	if err != nil {
-		log.Println("could not delete server", err)
-		return
-	}
-}
-
-func createServerSimulation(zahl int) tea.Cmd {
+func createServer(serverName string, m *model) tea.Cmd {
+	m.createServerState.serverNameInput.Reset()
 	return func() tea.Msg {
-		time.Sleep(time.Duration(zahl) * time.Second)
-		return SERVER_CREATED_SUCCESS
+		return createHetznerServer(serverName, m)
 	}
 }
 
-func createServer() tea.Msg {
-	// TODO: add userId to servername + guid
+func createHetznerServer(serverName string, m *model) tea.Msg {
 	hetzner_key := os.Getenv("HETZNER_CLOUD_API_KEY")
+	sshKeyName := os.Getenv("SSH_KEY_NAME")
 	client := hcloud.NewClient(hcloud.WithToken(hetzner_key))
 
-	serverOption := CreateServer{ServerName: "liftTest", DeployCountry: "germany", GithubLink: "", SshKeyName: "danielwaechtler@protonmail.com"}
+	serverOption := CreateServer{ServerName: serverName, DeployCountry: "germany", GithubLink: "", SshKeyName: sshKeyName}
 	serverType, err := hetzner.GetSmallestServer(client)
 	if err != nil {
 		log.Println(err.Error())
@@ -315,9 +459,11 @@ func createServer() tea.Msg {
 	)
 	if err != nil {
 		log.Println(err.Error())
+		return SERVER_CREATED_Failed
 	}
 
 	go checkAction(client, serverCreateResult.Action.ID)
+	m.createServerState.creatingServer = false
 	return SERVER_CREATED_SUCCESS
 	//
 	// RestartServer(client, serverCreateResult.Server.ID)
@@ -327,23 +473,38 @@ func createServer() tea.Msg {
 	// }
 }
 
-func RestartServer(client *hcloud.Client, serverID int64) {
-	for {
-		server, _, err := client.Server.GetByID(context.Background(), serverID)
-		if err != nil {
-			fmt.Println("error while reading serverinformation", err)
-		}
-		fmt.Println(serverID, ":", server.Status)
-		if server.Status == hcloud.ServerStatusRunning {
-			_, _, err := client.Server.Reboot(context.Background(), server)
-			if err != nil {
-				fmt.Println("error while reboot server", err)
-			}
-			return
-		}
-		time.Sleep(1 * time.Second)
+func deleteServer(serverID int) {
+	hetzner_key := os.Getenv("HETZNER_CLOUD_API_KEY")
+	client := hcloud.NewClient(hcloud.WithToken(hetzner_key))
+	server, _, err := client.Server.GetByID(context.Background(), int64(serverID))
+	if err != nil {
+		log.Println("could not get server for deleting", err)
+		return
+	}
+	_, _, err = client.Server.DeleteWithResult(context.Background(), server)
+	if err != nil {
+		log.Println("could not delete server", err)
+		return
 	}
 }
+
+// func RestartServer(client *hcloud.Client, serverID int64) {
+// 	for {
+// 		server, _, err := client.Server.GetByID(context.Background(), serverID)
+// 		if err != nil {
+// 			fmt.Println("error while reading serverinformation", err)
+// 		}
+// 		fmt.Println(serverID, ":", server.Status)
+// 		if server.Status == hcloud.ServerStatusRunning {
+// 			_, _, err := client.Server.Reboot(context.Background(), server)
+// 			if err != nil {
+// 				fmt.Println("error while reboot server", err)
+// 			}
+// 			return
+// 		}
+// 		time.Sleep(1 * time.Second)
+// 	}
+// }
 
 func checkAction(client *hcloud.Client, actionID int64) {
 	for {
@@ -357,5 +518,12 @@ func checkAction(client *hcloud.Client, actionID int64) {
 			return
 		}
 		time.Sleep(5 * time.Second)
+	}
+}
+
+func createServerSimulation(zahl int) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(time.Duration(zahl) * time.Second)
+		return SERVER_CREATED_SUCCESS
 	}
 }
