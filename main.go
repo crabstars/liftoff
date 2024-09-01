@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -26,23 +27,34 @@ var baseStyle = lipgloss.NewStyle().
 	BorderStyle(lipgloss.NormalBorder()).
 	BorderForeground(lipgloss.Color("240"))
 
-type createServerState struct {
+type CreateServerState struct {
 	waitingForServerNameInput bool
 	serverNameInput           textinput.Model
 	creatingServer            bool
 }
 
+type TableState struct {
+	showTable             bool
+	serverTable           table.Model
+	tabelUpdateChannel    chan TableUpdateMsg
+	tabelReloadingChannel chan bool
+	tableReloadRunning    bool
+	rowCursor             int
+}
+
+type ActionSelectionState struct {
+	choices []string // create or delete server
+	cursor  int      // which list item our cursor is pointing at
+}
+
 type TableUpdateMsg []table.Row
 
-// TODO cache later some hetzner information => only get server information at the start
 type model struct {
-	choices            []string // create or delete server
-	cursor             int      // which list item our cursor is pointing at
-	spinner            spinner.Model
-	showTable          bool
-	serverTable        table.Model
-	createServerState  createServerState
-	tabelUpdateChannel chan TableUpdateMsg
+	spinner              spinner.Model
+	createServerState    CreateServerState
+	actionSelectionState ActionSelectionState
+	tableState           TableState
+	program              *tea.Program
 }
 
 func initialModel() model {
@@ -53,20 +65,17 @@ func initialModel() model {
 	ti.CharLimit = 156
 	ti.Width = 20
 	return model{
-		createServerState:  createServerState{serverNameInput: ti},
-		choices:            []string{"Show server", "Create server", "Delete server"},
-		spinner:            s,
-		tabelUpdateChannel: make(chan TableUpdateMsg),
+		createServerState:    CreateServerState{serverNameInput: ti},
+		actionSelectionState: ActionSelectionState{choices: []string{"Show server", "Create server", "Delete server"}},
+		tableState:           TableState{tabelUpdateChannel: make(chan TableUpdateMsg), tabelReloadingChannel: make(chan bool)},
+		spinner:              s,
 	}
 }
 
 type TickMsg time.Time
 
 func (m model) Init() tea.Cmd {
-	// textinput.Blink()
-	// m.createServerState.serverNameInput.BlinkSpeed
-	// Just return `nil`, which means "no I/O right now, please."
-	return tea.Batch(m.spinner.Tick, tickEvery(time.Second*2))
+	return tea.Cmd(tickEvery(time.Second * 2))
 }
 
 func tickEvery(duration time.Duration) tea.Cmd {
@@ -81,17 +90,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case TickMsg:
-		if m.showTable {
-			// TODO: remember selected table
-			// BUG: table does not fetch after going back and again to showTable
-			go m.fetchTableRows()
+
+		select {
+		case m.tableState.tableReloadRunning = <-m.tableState.tabelReloadingChannel:
+		default:
+		}
+
+		if m.tableState.showTable {
+			// go m.fetchTableRows()
+			if !m.tableState.tableReloadRunning {
+				m.tableState.tableReloadRunning = true
+				go m.fetchTableRows()
+			}
 			select {
-			case rows := <-m.tabelUpdateChannel:
+			case rows := <-m.tableState.tabelUpdateChannel:
 				m.loadTableWithoutFetch(rows)
 			default:
 			}
-			return m, tickEvery(time.Second * 2)
 		}
+		return m, tickEvery(time.Second * 2)
 
 	case tea.KeyMsg:
 		keyStroke := msg.String()
@@ -123,38 +140,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		}
 
-		if m.showTable {
+		if m.tableState.showTable {
 			switch keyStroke {
 			case "esc":
-				m.showTable = false
+				m.tableState.showTable = false
 			case "q", "ctrl+c":
 				return m, tea.Quit
 			case "enter":
 				return m, tea.Batch(
-					tea.Printf("Let's go to %s!", m.serverTable.SelectedRow()[1]),
+					tea.Printf("Let's go to %s!", m.tableState.serverTable.SelectedRow()[1]),
 				)
 			}
-			m.serverTable, cmd = m.serverTable.Update(msg)
+			m.tableState.serverTable, cmd = m.tableState.serverTable.Update(msg)
+			m.tableState.rowCursor = m.tableState.serverTable.Cursor()
 			return m, cmd
 		}
 
 		switch keyStroke {
 		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
+			if m.actionSelectionState.cursor > 0 {
+				m.actionSelectionState.cursor--
 			}
 
 		case "down", "j":
-			if m.cursor < len(m.choices)-1 {
-				m.cursor++
+			if m.actionSelectionState.cursor < len(m.actionSelectionState.choices)-1 {
+				m.actionSelectionState.cursor++
 			}
 
 		case "enter", " ":
-			switch m.cursor {
+			switch m.actionSelectionState.cursor {
 			case 0:
 				log.Printf("Showing server")
 				m.loadTable()
-				m.showTable = true
+				// m.fetchTableRows()
+				// rows := <-m.tableState.tabelUpdateChannel
+				// m.loadTableWithoutFetch(rows)
+				m.tableState.showTable = true
 			case 1:
 				m.createServerState.waitingForServerNameInput = true
 				log.Printf("waiting for name input")
@@ -187,7 +208,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func ViewHandleCreateServerState(m model) string {
+func (m model) ViewState() string {
+	var builder strings.Builder
+
+	builder.WriteString("Model:\n")
+
+	builder.WriteString("  Spinner:\n")
+	builder.WriteString(fmt.Sprintf("    Current Frame: %s\n", m.spinner.View()))
+
+	builder.WriteString("  CreateServerState:\n")
+	builder.WriteString(fmt.Sprintf("    WaitingForServerNameInput: %v\n", m.createServerState.waitingForServerNameInput))
+	builder.WriteString(fmt.Sprintf("    ServerNameInput: %s\n", m.createServerState.serverNameInput.Value()))
+	builder.WriteString(fmt.Sprintf("    CreatingServer: %v\n", m.createServerState.creatingServer))
+
+	builder.WriteString("  ActionSelectionState:\n")
+	builder.WriteString(fmt.Sprintf("    Choices: %s\n", strings.Join(m.actionSelectionState.choices, ", ")))
+	builder.WriteString(fmt.Sprintf("    Cursor: %d\n", m.actionSelectionState.cursor))
+
+	builder.WriteString("  TableState:\n")
+	builder.WriteString(fmt.Sprintf("    TableReloadRunning: %v\n", m.tableState.tableReloadRunning))
+	builder.WriteString(fmt.Sprintf("    ShowTable: %v\n", m.tableState.showTable))
+	builder.WriteString(fmt.Sprintf("    RowCursor: %d\n", m.tableState.rowCursor))
+
+	builder.WriteString(fmt.Sprintf("\n\n", m.tableState.rowCursor))
+	return builder.String()
+
+}
+
+func (m model) ViewHandleCreateServerState() string {
 
 	if m.createServerState.waitingForServerNameInput {
 		return fmt.Sprintf("Enter server name:\n\n%s\n\n%s", m.createServerState.serverNameInput.View(), "(esc to quit)")
@@ -201,26 +249,29 @@ func ViewHandleCreateServerState(m model) string {
 }
 
 func (m model) View() string {
+	s := m.ViewState()
 
-	if state := ViewHandleCreateServerState(m); state != "" {
-		return state
+	if state := m.ViewHandleCreateServerState(); state != "" {
+		s += state
+		return s
 	}
-	if m.showTable {
-		log.Printf("%s", m.serverTable.View()+" "+m.serverTable.HelpView()+"\n")
-		return baseStyle.Render(m.serverTable.View()) + "\n " + m.serverTable.HelpView() + "\n"
+	if m.tableState.showTable {
+		log.Printf("%s", m.tableState.serverTable.View()+" "+m.tableState.serverTable.HelpView()+"\n")
+		s += baseStyle.Render(m.tableState.serverTable.View()) + "\n " + m.tableState.serverTable.HelpView() + "\n"
+		return s
 
 	}
 
-	s := "Choose hetzner action\n\n"
+	s += "Choose hetzner action\n\n"
 
-	for i, choice := range m.choices {
+	for i, choice := range m.actionSelectionState.choices {
 		cursor := " "
-		if m.cursor == i {
+		if m.actionSelectionState.cursor == i {
 			cursor = ">"
 		}
 
 		checked := " "
-		if i == m.cursor {
+		if i == m.actionSelectionState.cursor {
 			checked = "x"
 		}
 		s += fmt.Sprintf("%s [%s], %s\n", cursor, checked, choice)
@@ -243,7 +294,10 @@ func main() {
 		defer f.Close()
 	}
 
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	model := initialModel()
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	model.program = p
+
 	if _, err := p.Run(); err != nil {
 		log.Fatal("Error while starting %v", err)
 	}
@@ -288,7 +342,7 @@ func (m *model) loadTable() {
 		Background(lipgloss.Color("57")).
 		Bold(false)
 	t.SetStyles(s)
-	m.serverTable = t
+	m.tableState.serverTable = t
 }
 
 func (m *model) loadTableWithoutFetch(rows []table.Row) {
@@ -322,7 +376,14 @@ func (m *model) loadTableWithoutFetch(rows []table.Row) {
 		Background(lipgloss.Color("57")).
 		Bold(false)
 	t.SetStyles(s)
-	m.serverTable = t
+
+	if len(rows)-1 < m.tableState.rowCursor {
+		t.SetCursor(len(rows) - 1)
+	} else {
+		t.SetCursor(m.tableState.rowCursor)
+	}
+
+	m.tableState.serverTable = t
 }
 func (m *model) fetchTableRows() {
 	var rows []table.Row
@@ -330,64 +391,17 @@ func (m *model) fetchTableRows() {
 	client := hcloud.NewClient(hcloud.WithToken(hetzner_key))
 	servers, err := client.Server.All(context.Background())
 	if err != nil {
-		log.Println("could not get all server", err)
+		log.Println("could not get fetch server", err)
 		return
 	}
 	for _, server := range servers {
 		rows = append(rows, table.Row{server.Name, server.Image.Name, string(server.Status), server.Datacenter.Location.City,
 			string(server.ServerType.CPUType), server.ServerType.Name, fmt.Sprintf("%d", server.ServerType.Cores), fmt.Sprintf("%.0f GB", server.ServerType.Memory), fmt.Sprintf("%d GB", server.ServerType.Disk)})
-		// log.Println("%s", server.Name, server.Image.Name, server.Status, server.Datacenter.Name)
 	}
 	log.Println("table fetched")
-	m.tabelUpdateChannel <- rows
+	m.tableState.tableReloadingChannel <- false
+	m.tableState.tabelUpdateChannel <- rows
 }
-
-//	func (m *model) loadTableInBackground() {
-//		for {
-//			select {
-//			case <-m.tabelReloadChannel:
-//				log.Println("existing table reload")
-//				return
-//			default:
-//				columns := []table.Column{
-//					{Title: "Name", Width: 30},
-//					{Title: "Image", Width: 20},
-//					{Title: "Status", Width: 10},
-//					{Title: "Datacenter", Width: 10},
-//					{Title: "CPU Type", Width: 8},
-//					{Title: "Server Type", Width: 15},
-//					{Title: "Cores", Width: 10},
-//					{Title: "Memory", Width: 10},
-//					{Title: "Disk", Width: 10},
-//				}
-//				rows := listServer()
-//
-//				t := table.New(
-//					table.WithColumns(columns),
-//					table.WithRows(rows),
-//					table.WithFocused(true),
-//					table.WithHeight(10),
-//				)
-//
-//				s := table.DefaultStyles()
-//				s.Header = s.Header.
-//					BorderStyle(lipgloss.NormalBorder()).
-//					BorderForeground(lipgloss.Color("240")).
-//					BorderBottom(true).
-//					Bold(false)
-//				s.Selected = s.Selected.
-//					Foreground(lipgloss.Color("229")).
-//					Background(lipgloss.Color("57")).
-//					Bold(false)
-//				t.SetStyles(s)
-//				m.serverTable = t
-//				// m.serverTable, _ = m.serverTable.Update("reloaded")
-//				// m.serverTable.UpdateViewport()
-//				log.Println("table refreshed")
-//				time.Sleep(2 * time.Second)
-//			}
-//		}
-//	}
 func listServer() []table.Row {
 
 	var rows []table.Row
@@ -401,7 +415,6 @@ func listServer() []table.Row {
 	for _, server := range servers {
 		rows = append(rows, table.Row{server.Name, server.Image.Name, string(server.Status), server.Datacenter.Location.City,
 			string(server.ServerType.CPUType), server.ServerType.Name, fmt.Sprintf("%d", server.ServerType.Cores), fmt.Sprintf("%.0f GB", server.ServerType.Memory), fmt.Sprintf("%d GB", server.ServerType.Disk)})
-		// log.Println("%s", server.Name, server.Image.Name, server.Status, server.Datacenter.Name)
 	}
 	return rows
 }
