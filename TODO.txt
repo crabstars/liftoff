@@ -1,0 +1,8 @@
+
+1. only have show server table and then actions like create, delete, edit or details 
+2. fix table
+3. delete server
+4. improve create
+5. detail for server
+6. make beautiful
+7. server creation with cookbooks
