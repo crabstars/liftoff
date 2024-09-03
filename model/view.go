@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func (m Model) ViewState() string {
@@ -27,6 +29,7 @@ func (m Model) ViewState() string {
 	builder.WriteString(fmt.Sprintf("    TableReloadRunning: %v\n", m.TableState.TableReloadRunning))
 	builder.WriteString(fmt.Sprintf("    ShowTable: %v\n", m.TableState.ShowTable))
 	builder.WriteString(fmt.Sprintf("    RowCursor: %d\n", m.TableState.RowCursor))
+	builder.WriteString(fmt.Sprintf("    ServerIds: %v\n", m.TableState.ServerIdIndexRelations))
 
 	builder.WriteString("\n\n")
 	return builder.String()
@@ -59,6 +62,19 @@ func (m Model) View() string {
 	if m.TableState.ShowTable {
 		log.Printf("%s", m.TableState.ServerTable.View()+" "+m.TableState.ServerTable.HelpView()+"\n")
 		s += baseStyle.Render(m.TableState.ServerTable.View()) + "\n " + m.TableState.ServerTable.HelpView() + "\n"
+		if m.TableState.ShowOverlay {
+			overlay := lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				Padding(1).
+				Render(fmt.Sprintf("Delete?\n\nPress 'y' to confirm, 'n' to cancel."))
+
+			s = lipgloss.Place(80, 24,
+				lipgloss.Center, lipgloss.Top,
+				overlay,
+				lipgloss.WithWhitespaceChars(""),
+				lipgloss.WithWhitespaceForeground(lipgloss.Color("236")),
+			)
+		}
 		return s
 
 	}

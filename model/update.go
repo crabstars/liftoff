@@ -2,11 +2,11 @@ package model
 
 import (
 	"log"
-	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/crabstars/liftoff/hetzner"
+	"github.com/crabstars/liftoff/internal"
 )
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -15,15 +15,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case TableUpdateMsg:
-		m.loadTableWithoutFetch(msg)
+		m.loadTableWithoutFetch(msg.rows)
+		m.TableState.ServerIdIndexRelations = msg.ids
 		m.TableState.TableReloadRunning = false
 
 	case TickMsg:
-		if m.TableState.ShowTable && !m.TableState.TableReloadRunning {
-			m.TableState.TableReloadRunning = true
-			go m.fetchTableRows()
-		}
-		return m, tickEvery(time.Second * 3)
+		// if m.TableState.ShowTable && !m.TableState.TableReloadRunning {
+		// 	m.TableState.TableReloadRunning = true
+		// 	go m.fetchTableRows()
+		// }
+		// return m, tickEvery(time.Second * 3)
 
 	case tea.KeyMsg:
 		keyStroke := msg.String()
@@ -66,6 +67,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(
 					tea.Printf("Let's go to %s!", m.TableState.ServerTable.SelectedRow()[1]),
 				)
+			case "d":
+				if !m.TableState.ShowOverlay {
+					m.TableState.ShowOverlay = true
+					// m.deleteIndex = m.cursor
+				}
+				index := m.TableState.RowCursor
+				if len(m.TableState.ServerTable.Rows()) > 0 && index >= 0 {
+					err := hetzner.DeleteServer2(m.EnvValues.HetznerApiKey, m.TableState.ServerIdIndexRelations[index])
+					if err != nil {
+						log.Println("error while deleting", err)
+					} else {
+						rows := m.TableState.ServerTable.Rows()
+						rows = internal.DeleteElementAt(rows, index)
+						m.TableState.ServerIdIndexRelations = internal.DeleteElementAt(m.TableState.ServerIdIndexRelations, index)
+						m.TableState.ServerTable.SetRows(rows)
+					}
+				}
+			case "y":
+				m.TableState.ShowOverlay = false
+			case "n":
+				m.TableState.ShowOverlay = false
 			}
 			m.TableState.ServerTable, cmd = m.TableState.ServerTable.Update(msg)
 			m.TableState.RowCursor = m.TableState.ServerTable.Cursor()

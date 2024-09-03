@@ -25,6 +25,9 @@ type TableState struct {
 	TabelReloadingChannel chan bool
 	TableReloadRunning    bool
 	RowCursor             int
+	// index corresponds to the row index
+	ServerIdIndexRelations []int64
+	ShowOverlay            bool
 }
 
 type ActionSelectionState struct {
@@ -32,7 +35,10 @@ type ActionSelectionState struct {
 	Cursor  int      // which list item our cursor is pointing at
 }
 
-type TableUpdateMsg []table.Row
+type TableUpdateMsg struct {
+	rows []table.Row
+	ids  []int64
+}
 
 type TickMsg time.Time
 

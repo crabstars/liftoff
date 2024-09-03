@@ -1,6 +1,9 @@
 package model
 
 import (
+	"fmt"
+	"log"
+
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/crabstars/liftoff/hetzner"
@@ -46,7 +49,18 @@ func (m *Model) loadTableWithoutFetch(rows []table.Row) {
 
 	m.TableState.ServerTable = t
 }
+
 func (m *Model) fetchTableRows() {
-	rows := hetzner.ListServer(m.EnvValues.HetznerApiKey)
-	m.Program.Send(TableUpdateMsg(rows))
+	servers, err := hetzner.ListServer(m.EnvValues.HetznerApiKey)
+	if err != nil {
+		log.Println("Failed to load server", err.Error())
+	}
+	rows := make([]table.Row, len(servers))
+	serverIndexIdRelations := make([]int64, len(servers))
+	for i, server := range servers {
+		rows[i] = table.Row{server.Name, server.Image.Name, string(server.Status), server.Datacenter.Location.City, string(server.ServerType.CPUType), server.ServerType.Name, fmt.Sprintf("%d", server.ServerType.Cores), fmt.Sprintf("%.0f GB", server.ServerType.Memory), fmt.Sprintf("%d GB", server.ServerType.Disk)}
+		serverIndexIdRelations[i] = server.ID
+	}
+
+	m.Program.Send(TableUpdateMsg{rows, serverIndexIdRelations})
 }
