@@ -2,6 +2,7 @@ package model
 
 import (
 	"log"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -20,11 +21,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.TableState.TableReloadRunning = false
 
 	case TickMsg:
-		// if m.TableState.ShowTable && !m.TableState.TableReloadRunning {
-		// 	m.TableState.TableReloadRunning = true
-		// 	go m.fetchTableRows()
-		// }
-		// return m, tickEvery(time.Second * 3)
+		if m.TableState.ShowTable && !m.TableState.TableReloadRunning {
+			m.TableState.TableReloadRunning = true
+			go m.fetchTableRows()
+		}
+		return m, tickEvery(time.Second * 3)
 
 	case tea.KeyMsg:
 		keyStroke := msg.String()
@@ -60,6 +61,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.TableState.ShowTable {
 			switch keyStroke {
 			case "esc":
+				m.TableState.ShowOverlay = false
 				m.TableState.ShowTable = false
 			case "q", "ctrl+c":
 				return m, tea.Quit
@@ -68,26 +70,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					tea.Printf("Let's go to %s!", m.TableState.ServerTable.SelectedRow()[1]),
 				)
 			case "d":
-				if !m.TableState.ShowOverlay {
-					m.TableState.ShowOverlay = true
-					// m.deleteIndex = m.cursor
-				}
-				index := m.TableState.RowCursor
-				if len(m.TableState.ServerTable.Rows()) > 0 && index >= 0 {
-					err := hetzner.DeleteServer2(m.EnvValues.HetznerApiKey, m.TableState.ServerIdIndexRelations[index])
-					if err != nil {
-						log.Println("error while deleting", err)
-					} else {
-						rows := m.TableState.ServerTable.Rows()
-						rows = internal.DeleteElementAt(rows, index)
-						m.TableState.ServerIdIndexRelations = internal.DeleteElementAt(m.TableState.ServerIdIndexRelations, index)
-						m.TableState.ServerTable.SetRows(rows)
-					}
-				}
+				m.TableState.ShowOverlay = true
+				return m, nil
 			case "y":
-				m.TableState.ShowOverlay = false
+				if m.TableState.ShowOverlay {
+					index := m.TableState.RowCursor
+					if len(m.TableState.ServerTable.Rows()) > 0 && index >= 0 {
+						err := hetzner.DeleteServer2(m.EnvValues.HetznerApiKey, m.TableState.ServerIdIndexRelations[index])
+						if err != nil {
+							log.Println("error while deleting", err)
+						} else {
+							rows := m.TableState.ServerTable.Rows()
+							rows = internal.DeleteElementAt(rows, index)
+							m.TableState.ServerIdIndexRelations = internal.DeleteElementAt(m.TableState.ServerIdIndexRelations, index)
+							m.TableState.ServerTable.SetRows(rows)
+						}
+					}
+					m.TableState.ShowOverlay = false
+				}
 			case "n":
-				m.TableState.ShowOverlay = false
+				if m.TableState.ShowOverlay {
+					m.TableState.ShowOverlay = false
+				}
 			}
 			m.TableState.ServerTable, cmd = m.TableState.ServerTable.Update(msg)
 			m.TableState.RowCursor = m.TableState.ServerTable.Cursor()
